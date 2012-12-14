@@ -8,12 +8,16 @@ use List::Util qw(min);
 use List::MoreUtils qw(firstidx);
 use POSIX qw(strftime);
 use Scalar::Util qw(looks_like_number);
+use LWP::Simple;
+use JSON;
 
-use constant DISK    => 1;
-use constant MEM     => DISK << 1;
-use constant CPU     => MEM << 1;
+use constant DISK        => 1;
+use constant MEM         => DISK << 1;
+use constant CPU         => MEM << 1;
+use constant S2SJENKINS  => CPU << 1;
+use constant PERLJENKINS => S2SJENKINS << 1;
 
-use constant ENABLED     => DISK|MEM|CPU;
+use constant ENABLED     => DISK|MEM|CPU|S2SJENKINS|PERLJENKINS;
 use constant DELAY       => 1;
 use constant DATE_FORMAT => '%Y-%m-%d %T';
 
@@ -55,12 +59,34 @@ sub get_kv_line_callback {
 	}
 }
 
+my $jenkins_once_callback = sub {
+	my ($json) = @_;
+	$json = JSON::from_json($json);
+	my @return = (
+		$json->{buildable},
+		$json->{lastBuild}->{number} != $json->{lastCompletedBuild}->{number},
+		$json->{lastBuild}->{number},
+		$json->{healthReport}->[0]->{score},
+		$json->{healthReport}->[1]->{score},
+	);
+	return @return;
+};
+
+use constant JENKINS_PRESETS => {
+	total_cols    => [qw(buildable building last_build score last_score)],
+	summary_lines => [
+		'BUILD: buildable: %buildable%, building: %building%, last build: %last_build%',
+		'SCORE: last 5 score: %score%, last score: %last_score%',
+	],
+	once_callback => $jenkins_once_callback,
+};
+
 use constant JOBS => [
 	{
 		id   => DISK(),
 		name => 'Disk I/O',
 		out_filename  => 'r-disk.csv',
-		in_filename   => '/proc/diskstats',
+		in_uri   => 'file:///proc/diskstats',
 		total_cols    => [qw(read_sectors read_millis write_sectors write_millis total_millis)],
 		summary_lines => [
 			'READ:  sector count: %read_sectors%, time spent: %read_millis% ms',
@@ -73,7 +99,7 @@ use constant JOBS => [
 		id   => MEM(),
 		name => 'Memory',
 		out_filename  => 'r-mem.csv',
-		in_filename   => '/proc/meminfo',
+		in_uri   => 'file:///proc/meminfo',
 		total_cols    => [qw(free_mem free_swap)],
 		summary_lines => [
 			'FREE: RAM: %free_mem% kB, swap: %free_swap% kB',
@@ -84,13 +110,27 @@ use constant JOBS => [
 		id => CPU(),
 		name => 'CPU',
 		out_filename  => 'r-cpu.csv',
-		in_filename   => '/proc/stat',
+		in_uri   => 'file:///proc/stat',
 		total_cols    => [qw(user nice system idle iowait)],
 		summary_lines => [
 			'PROCESSES: user: %user%, nice: %nice%, system: %system%',
 			'WAITING:   idle: %idle%, IO wait: %iowait%',
 		],
 		line_callback => get_simple_line_callback('cpu[0-9]+', [2,3,4,5,6]),
+	},
+	{
+		id => S2SJENKINS(),
+		name => 'S2S Jenkins',
+		out_filename  => 'r-s2sjenkins.csv',
+		in_uri   => 'http://manganese:8080/job/S2S/api/json',
+		%{JENKINS_PRESETS()},
+	},
+	{
+		id => PERLJENKINS(),
+		name => 'Perl Jenkins',
+		out_filename  => 'r-perljenkins.csv',
+		in_uri   => 'http://manganese:8080/job/Perl/api/json',
+		%{JENKINS_PRESETS()},
 	},
 ];
 
@@ -149,24 +189,54 @@ while (1) {
 	print sprintf "============== %s SECOND DELAY (%s) ==============\n", DELAY, $dtstring;
 	foreach my $job (@{JOBS()}) {
 		if (ENABLED & $job->{id}) {
-			open IN, '<', $job->{in_filename} or die $!;
 
 			my %totals = ();
 
-			# Loop through all rows in the file and total results of line callback
-			if (defined $job->{line_callback}) {
+			# Functions that rely on auto loading URI
+			if (defined $job->{in_uri}) {
+				# Match the URI type
+				my @uri_parts = $job->{in_uri} =~ m#(^http|file)://(.*)#;
+				die sprintf "Unknown URI: %s\n", $job->{in_uri}
+					unless @uri_parts == 2;
+
+				# Open the resource
+				my ($uri_type, $uri_resource) = @uri_parts;
+				if ($uri_type eq 'file') {
+					open IN, '<', $uri_resource or die $!;
+				} elsif ($uri_type eq 'http') {
+					open IN, '<', \get($job->{in_uri});
+				}
+
+				# Loop through all rows in the file and total results of line
+				# callback as well as creating a series of bytes
+				my $full_file;
 				while (<IN>) {
-					my @row_data = $job->{line_callback}->($_);
+					if (defined $job->{line_callback}) {
+						my @row_data = $job->{line_callback}->($_);
+						next unless (@row_data);
+						add_to_totals(\@row_data, \%totals, $job->{total_cols});
+					}
+					if (defined $job->{once_callback}) {
+						if (defined $full_file) {
+							$full_file  = $_;
+						} else {
+							$full_file .= $_;
+						}
+					}
+				}
+
+				# Do the once only callback
+				if (defined $job->{once_callback}) {
+					my @row_data = $job->{once_callback}->($full_file);
 					next unless (@row_data);
 					add_to_totals(\@row_data, \%totals, $job->{total_cols});
 				}
 			}
 
-			# Do the once only callback
-			if (defined $job->{once_callback}) {
-				my @row_data = $job->{once_callback}->();
-				next unless (@row_data);
-				add_to_totals(\@row_data, \%totals, $job->{total_cols});
+			if (defined $job->{once_callback_manual}) {
+				my @row_data = $job->{once_callback_manual}->();
+				add_to_totals(\@row_data, \%totals, $job->{total_cols})
+					if @row_data;
 			}
 
 			# Output the line to CSV
