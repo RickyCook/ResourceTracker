@@ -27,13 +27,13 @@ sub get_simple_line_callback {
 	$split_regex ||= '\s';
 
 	return sub {
-		my ($_) = @_;
+		my ($line) = @_;
 
 		# Only care about a set of lines
-		return unless /$match_regex/;
+		return unless $line =~ /$match_regex/;
 
 		# Split (usually at whitespace)
-		my @split = grep { !($_ eq '') } split /$split_regex/;
+		my @split = grep { !($_ eq '') } split /$split_regex/, $line;
 
 		# Return columns
 		return @split[@$indexes];
