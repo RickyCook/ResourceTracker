@@ -7,10 +7,11 @@ use Data::Dumper;
 use List::Util qw(min);
 use List::MoreUtils qw(firstidx);
 use POSIX qw(strftime);
+use Scalar::Util qw(looks_like_number);
 
-use constant DISK => 1;
-use constant MEM  => DISK << 1;
-use constant CPU  => MEM << 1;
+use constant DISK    => 1;
+use constant MEM     => DISK << 1;
+use constant CPU     => MEM << 1;
 
 use constant ENABLED     => DISK|MEM|CPU;
 use constant DELAY       => 1;
@@ -116,6 +117,33 @@ foreach my $job (@{JOBS()}) {
 	}
 }
 
+sub add_to_totals {
+	my ($data, $totals, $columns) = @_;
+
+	# Total the results
+	my $settable_count = min(scalar @$data, scalar @{$columns});
+	for (my $i = 0; $i < $settable_count; $i++) {
+		if (defined $data->[$i]) {
+
+			my $totals_col_ref = \($totals->{$columns->[$i]});
+			my $both_numeric = looks_like_number($data->[$i]) && looks_like_number($$totals_col_ref);
+
+			if (!$both_numeric) {
+				if (defined $$totals_col_ref) {
+					$$totals_col_ref = join ',',
+						$$totals_col_ref,
+						$data->[$i];
+				} else {
+					$$totals_col_ref = $data->[$i];
+				}
+			} else {
+				$$totals_col_ref ||= 0;
+				$$totals_col_ref += $data->[$i];
+			}
+		}
+	}
+}
+
 while (1) {
 	my $dtstring = strftime(DATE_FORMAT,localtime);
 	print sprintf "============== %s SECOND DELAY (%s) ==============\n", DELAY, $dtstring;
@@ -123,18 +151,22 @@ while (1) {
 		if (ENABLED & $job->{id}) {
 			open IN, '<', $job->{in_filename} or die $!;
 
-			# Loop through all rows in the file and total results of line callback
 			my %totals = ();
-			while (<IN>) {
-				my @row_data = $job->{line_callback}->($_);
-				next unless (@row_data);
 
-				# Total the results
-				my $settable_count = min(scalar @row_data, scalar @{$job->{total_cols}});
-				for (my $i = 0; $i < $settable_count; $i++) {
-					$totals{$job->{total_cols}->[$i]} += $row_data[$i]
-						if defined $row_data[$i];
+			# Loop through all rows in the file and total results of line callback
+			if (defined $job->{line_callback}) {
+				while (<IN>) {
+					my @row_data = $job->{line_callback}->($_);
+					next unless (@row_data);
+					add_to_totals(\@row_data, \%totals, $job->{total_cols});
 				}
+			}
+
+			# Do the once only callback
+			if (defined $job->{once_callback}) {
+				my @row_data = $job->{once_callback}->();
+				next unless (@row_data);
+				add_to_totals(\@row_data, \%totals, $job->{total_cols});
 			}
 
 			# Output the line to CSV
