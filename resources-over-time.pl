@@ -14,10 +14,11 @@ use JSON;
 use constant DISK        => 1;
 use constant MEM         => DISK << 1;
 use constant CPU         => MEM << 1;
-use constant S2SJENKINS  => CPU << 1;
+use constant JENKINS     => CPU << 1;
+use constant S2SJENKINS  => JENKINS << 1;
 use constant PERLJENKINS => S2SJENKINS << 1;
 
-use constant ENABLED     => DISK|MEM|CPU|S2SJENKINS|PERLJENKINS;
+use constant ENABLED     => DISK|MEM|CPU|JENKINS|S2SJENKINS;
 use constant DELAY       => 1;
 use constant DATE_FORMAT => '%Y-%m-%d %T';
 
@@ -59,7 +60,7 @@ sub get_kv_line_callback {
 	}
 }
 
-my $jenkins_once_callback = sub {
+my $jenkins_project_once_callback = sub {
 	my ($json) = @_;
 	$json = JSON::from_json($json);
 	my @return = (
@@ -72,13 +73,13 @@ my $jenkins_once_callback = sub {
 	return @return;
 };
 
-use constant JENKINS_PRESETS => {
+use constant JENKINS_PROJECT_PRESETS => {
 	total_cols    => [qw(buildable building last_build score last_score)],
 	summary_lines => [
 		'BUILD: buildable: %buildable%, building: %building%, last build: %last_build%',
 		'SCORE: last 5 score: %score%, last score: %last_score%',
 	],
-	once_callback => $jenkins_once_callback,
+	once_callback => $jenkins_project_once_callback,
 };
 
 use constant JOBS => [
@@ -119,18 +120,37 @@ use constant JOBS => [
 		line_callback => get_simple_line_callback('cpu[0-9]+', [2,3,4,5,6]),
 	},
 	{
+		id => JENKINS(),
+		name => 'Jenkins',
+		out_filename  => 'r-jenkins.csv',
+		in_uri   => 'http://manganese:8080/computer/api/json',
+		total_cols    => [qw(busy_executors total_executors)],
+		summary_lines => [
+			'EXECUTORS: busy: %busy_executors%, total: %total_executors%',
+		],
+		once_callback => sub {
+			my ($json) = @_;
+			$json = JSON::from_json($json);
+			my @return = (
+				$json->{busyExecutors},
+				$json->{totalExecutors},
+			);
+			return @return;
+		},
+	},
+	{
 		id => S2SJENKINS(),
 		name => 'S2S Jenkins',
 		out_filename  => 'r-s2sjenkins.csv',
 		in_uri   => 'http://manganese:8080/job/S2S/api/json',
-		%{JENKINS_PRESETS()},
+		%{JENKINS_PROJECT_PRESETS()},
 	},
 	{
 		id => PERLJENKINS(),
 		name => 'Perl Jenkins',
 		out_filename  => 'r-perljenkins.csv',
 		in_uri   => 'http://manganese:8080/job/Perl/api/json',
-		%{JENKINS_PRESETS()},
+		%{JENKINS_PROJECT_PRESETS()},
 	},
 ];
 
